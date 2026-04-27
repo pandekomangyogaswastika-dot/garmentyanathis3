@@ -416,6 +416,9 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
           deps: [filterStatus, refetchKey],
           itemLabel: 'PO',
           initialSort: { key: 'created_at', dir: 'desc' },
+          virtualize: true,
+          virtualizeHeight: 650,
+          estimatedRowHeight: 80,
         }}
         actions={
           <div className="flex items-center gap-2">

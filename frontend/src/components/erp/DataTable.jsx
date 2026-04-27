@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Download, Loader2 } from 'lucide-react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useSortableTable } from './useSortableTable';
 import PaginationFooter from './PaginationFooter';
 
@@ -223,6 +224,41 @@ export default function DataTable({
   // ─── Render data choice ────────────────────────────────────────────────────
   const renderRows = isServerMode ? serverItems : clientPaginated;
 
+  // ─── Virtualization (opt-in via serverPagination.virtualize) ──────────────
+  // When enabled, only the rows visible in the scroll viewport are rendered to
+  // the DOM. Critical for `per_page >= 50` where DOM cost dominates.
+  // Falls back to non-virtualized rendering automatically when:
+  //   - data is empty (loading / no rows)
+  //   - shouldVirtualize is false
+  const shouldVirtualize = isServerMode && !!serverPagination?.virtualize && renderRows.length > 0;
+  const virtualizeMaxHeight = serverPagination?.virtualizeHeight || 600;
+  const estimatedRowHeight = serverPagination?.estimatedRowHeight || 56;
+
+  const scrollParentRef = useRef(null);
+  const rowVirtualizer = useVirtualizer({
+    count: shouldVirtualize ? renderRows.length : 0,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => estimatedRowHeight,
+    overscan: 8,
+    // Re-measure whenever the underlying data identity changes
+    getItemKey: (index) => renderRows[index]?.id ?? index,
+  });
+
+  const virtualItems = shouldVirtualize ? rowVirtualizer.getVirtualItems() : [];
+  const totalSize = shouldVirtualize ? rowVirtualizer.getTotalSize() : 0;
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0
+    ? totalSize - virtualItems[virtualItems.length - 1].end
+    : 0;
+
+  // Reset scroll to top whenever a fresh page lands (server mode)
+  useEffect(() => {
+    if (shouldVirtualize && scrollParentRef.current) {
+      scrollParentRef.current.scrollTop = 0;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverPage, debouncedSearch, serverSort.key, serverSort.dir, serverPerPage]);
+
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
       {/* Header */}
@@ -263,9 +299,14 @@ export default function DataTable({
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto">
+      <div
+        ref={scrollParentRef}
+        className={shouldVirtualize ? 'overflow-auto' : 'overflow-x-auto'}
+        style={shouldVirtualize ? { maxHeight: virtualizeMaxHeight } : undefined}
+        data-testid={shouldVirtualize ? 'datatable-virtual-scroller' : undefined}
+      >
         <table className="w-full">
-          <thead>
+          <thead className={shouldVirtualize ? 'sticky top-0 z-10' : undefined}>
             <tr className="bg-slate-50">
               {columns.map((col) => {
                 const isSortable = col.sortable !== false && col.key !== 'actions';
@@ -277,7 +318,7 @@ export default function DataTable({
                     aria-sort={active ? (activeSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
                     data-testid={isSortable ? `sort-header-${col.key}` : undefined}
                     onClick={isSortable ? () => toggleSort(col.key) : undefined}
-                    className={`text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap ${
+                    className={`text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap bg-slate-50 ${
                       isSortable ? 'cursor-pointer select-none hover:bg-slate-100' : ''
                     }`}
                   >
@@ -297,41 +338,88 @@ export default function DataTable({
               })}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
-            {isServerMode && serverLoading && renderRows.length === 0 ? (
-              <tr>
-                <td colSpan={columns.length} className="text-center py-12 text-slate-400 text-sm">
-                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-500" />
-                  Memuat data...
-                </td>
-              </tr>
-            ) : renderRows.length === 0 ? (
-              <tr>
-                <td colSpan={columns.length} className="text-center py-12 text-slate-400 text-sm">
-                  Tidak ada data
-                </td>
-              </tr>
-            ) : (
-              renderRows.map((row, i) => (
-                <React.Fragment key={row.id || i}>
-                  <tr className="hover:bg-slate-50 transition-colors">
-                    {columns.map((col) => (
-                      <td key={col.key} className="px-4 py-3 text-sm text-slate-700">
-                        {col.render ? col.render(row[col.key], row) : (row[col.key] ?? '-')}
-                      </td>
-                    ))}
+          {shouldVirtualize ? (
+            // ─── Virtualized rendering: one tbody per row so measureElement
+            // can pick up dynamic heights (including expanded sub-rows). ───
+            <>
+              {paddingTop > 0 && (
+                <tbody aria-hidden="true">
+                  <tr>
+                    <td colSpan={columns.length} style={{ height: paddingTop, padding: 0, border: 0 }} />
                   </tr>
-                  {expandedRow && expandedRow(row) && (
-                    <tr>
-                      <td colSpan={columns.length} className="p-0 border-b border-slate-100">
-                        {expandedRow(row)}
-                      </td>
+                </tbody>
+              )}
+              {virtualItems.map((vi) => {
+                const row = renderRows[vi.index];
+                const exp = expandedRow ? expandedRow(row) : null;
+                return (
+                  <tbody
+                    key={row.id ?? vi.index}
+                    data-index={vi.index}
+                    ref={rowVirtualizer.measureElement}
+                  >
+                    <tr className="hover:bg-slate-50 transition-colors border-t border-slate-100">
+                      {columns.map((col) => (
+                        <td key={col.key} className="px-4 py-3 text-sm text-slate-700">
+                          {col.render ? col.render(row[col.key], row) : (row[col.key] ?? '-')}
+                        </td>
+                      ))}
                     </tr>
-                  )}
-                </React.Fragment>
-              ))
-            )}
-          </tbody>
+                    {exp && (
+                      <tr>
+                        <td colSpan={columns.length} className="p-0 border-b border-slate-100">
+                          {exp}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                );
+              })}
+              {paddingBottom > 0 && (
+                <tbody aria-hidden="true">
+                  <tr>
+                    <td colSpan={columns.length} style={{ height: paddingBottom, padding: 0, border: 0 }} />
+                  </tr>
+                </tbody>
+              )}
+            </>
+          ) : (
+            <tbody className="divide-y divide-slate-100">
+              {isServerMode && serverLoading && renderRows.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className="text-center py-12 text-slate-400 text-sm">
+                    <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-500" />
+                    Memuat data...
+                  </td>
+                </tr>
+              ) : renderRows.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className="text-center py-12 text-slate-400 text-sm">
+                    Tidak ada data
+                  </td>
+                </tr>
+              ) : (
+                renderRows.map((row, i) => (
+                  <React.Fragment key={row.id || i}>
+                    <tr className="hover:bg-slate-50 transition-colors">
+                      {columns.map((col) => (
+                        <td key={col.key} className="px-4 py-3 text-sm text-slate-700">
+                          {col.render ? col.render(row[col.key], row) : (row[col.key] ?? '-')}
+                        </td>
+                      ))}
+                    </tr>
+                    {expandedRow && expandedRow(row) && (
+                      <tr>
+                        <td colSpan={columns.length} className="p-0 border-b border-slate-100">
+                          {expandedRow(row)}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))
+              )}
+            </tbody>
+          )}
         </table>
       </div>
 

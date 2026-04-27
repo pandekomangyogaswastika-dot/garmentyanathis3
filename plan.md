@@ -12,6 +12,7 @@
 - ✅ **Completed (Phase 10C):** Frontend server-side pagination rolled out across 5 modules — Products, Invoice, ProductionPO (DataTable serverPagination mode), Activity Logs & Payments (custom UI + PaginationFooter). Backward-compatible: legacy DataTable usage unaffected.
 - ✅ **Completed (Phase 10B-rem):** Batched N+1 in `/api/reports/{production|shipment|progress|return|accessory}`, `/api/production-monitoring-v2`, `/api/distribusi-kerja`. Fixed an orphan-syntax block at end of `server.py` left from a prior merge.
 - ✅ **Verified (iteration_14, 100% backend pass):** Pagination envelopes correct on all migrated endpoints, legacy mode preserved, audit fixes still pass after refactor.
+- ✅ **Completed (Phase 10D — Virtualized rows):** `@tanstack/react-virtual` integrated as opt-in via `serverPagination.virtualize` on DataTable. Uses multi-tbody + `measureElement` for dynamic heights (compatible with expanded rows). Sticky thead in scroll viewport. Smoke-tested with 60-row dataset: only ~19 tbodies in DOM out of full per_page (vs 100% legacy), verified `data-testid="datatable-virtual-scroller"`. Enabled on Products, Invoice, ProductionPO modules. Custom UIs (ActivityLog, Payment) intentionally untouched per scope.
 - 🎯 **Current Focus (next):** Performance tuning follow-up — **frontend server-side pagination** rollout (DataTable + non-DataTable screens) + complete remaining backend N+1 reductions on report endpoints.
 
 ---

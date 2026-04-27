@@ -1,42 +1,22 @@
 [
   {
-    "content": "Create reusable PaginationFooter component",
+    "content": "Install @tanstack/react-virtual",
     "status": "completed"
   },
   {
-    "content": "Enhance DataTable.jsx with optional serverPagination mode (loading state, debounced search, server sort)",
+    "content": "Add virtualize mode to DataTable (opt-in via serverPagination.virtualize, dynamic-height with measureElement, multi-tbody pattern for expanded rows)",
     "status": "completed"
   },
   {
-    "content": "Migrate ProductsModule to serverPagination",
+    "content": "Enable virtualize on ProductionPO, Invoice, Products modules",
     "status": "completed"
   },
   {
-    "content": "Migrate InvoiceModule to serverPagination (with status filter)",
+    "content": "Lint + esbuild + screenshot smoke test",
     "status": "completed"
   },
   {
-    "content": "Migrate ProductionPOModule to serverPagination (with status filter)",
-    "status": "completed"
-  },
-  {
-    "content": "Migrate ActivityLogModule with PaginationFooter (custom UI)",
-    "status": "completed"
-  },
-  {
-    "content": "Migrate PaymentModule with PaginationFooter (two tabs paginated independently)",
-    "status": "completed"
-  },
-  {
-    "content": "Lint frontend + verify no errors via esbuild",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 10B-rem: identify & batch-fix remaining N+1 in report endpoints",
-    "status": "completed"
-  },
-  {
-    "content": "Test all migrated screens via testing agent",
-    "status": "completed"
+    "content": "Update plan.md & finish",
+    "status": "in_progress"
   }
 ]

@@ -177,6 +177,8 @@ export default function InvoiceModule({ token, userRole, onNavigate }) {
           deps: [filterStatus, refetchKey],
           itemLabel: 'invoice',
           initialSort: { key: 'created_at', dir: 'desc' },
+          virtualize: true,
+          virtualizeHeight: 600,
         }}
       />
 

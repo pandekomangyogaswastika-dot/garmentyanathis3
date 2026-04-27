@@ -187,6 +187,8 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
           deps: [refetchKey],
           itemLabel: 'produk',
           initialSort: { key: 'created_at', dir: 'desc' },
+          virtualize: true,
+          virtualizeHeight: 600,
         }}
         expandedRow={(row) => expandedProduct === row.id ? (
           <div className="bg-slate-50 border-t border-slate-100 p-4">
