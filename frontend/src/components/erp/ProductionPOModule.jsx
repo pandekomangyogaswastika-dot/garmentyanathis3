@@ -29,6 +29,7 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
   const [filterStatus, setFilterStatus] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [closeForm, setCloseForm] = useState({ close_reason: CLOSE_REASONS[0], close_notes: '' });
+  const [refetchKey, setRefetchKey] = useState(0);
   const [form, setForm] = useState({ po_number: '', customer_name: '', buyer_id: '', vendor_id: '', po_date: '', deadline: '', delivery_deadline: '', notes: '', items: [], po_accessories: [] });
 
   const isSuperAdmin = userRole === 'superadmin';
@@ -36,7 +37,29 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
   const canCreate = userRole === 'superadmin' || hasPerm('production_po.create') || hasPerm('po.create');
   const canDelete = ['superadmin', 'admin'].includes(userRole) || hasPerm('po.delete');
 
-  useEffect(() => { fetchPOs(); fetchProducts(); fetchVendors(); fetchBuyers(); fetchAccessories(); }, []);
+  useEffect(() => { fetchProducts(); fetchVendors(); fetchBuyers(); fetchAccessories(); }, []);
+
+  const refetchPOs = () => setRefetchKey((k) => k + 1);
+
+  // Server-paginated fetcher (Phase 10C)
+  const posFetcher = async ({ page, per_page, sort_by, sort_dir, search }) => {
+    const params = new URLSearchParams();
+    params.set('page', String(page));
+    params.set('per_page', String(per_page));
+    if (sort_by) params.set('sort_by', sort_by);
+    if (sort_dir) params.set('sort_dir', sort_dir);
+    if (search) params.set('search', search);
+    if (filterStatus) params.set('status', filterStatus);
+    const res = await fetch(`/api/production-pos?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error('Gagal memuat PO');
+    const env = await res.json();
+    // Keep `pos` array around so `expandedRowRender` can show item details
+    const items = Array.isArray(env?.items) ? env.items : (Array.isArray(env) ? env : []);
+    setPOs(items);
+    return env;
+  };
 
   const fetchBuyers = async () => {
     try {
@@ -58,17 +81,6 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
     const res = await fetch('/api/garments', { headers: { Authorization: `Bearer ${token}` } });
     const data = await res.json();
     setVendors(Array.isArray(data) ? data.filter(g => g.status === 'active') : []);
-  };
-
-  const fetchPOs = async (search = '') => {
-    let url = '/api/production-pos';
-    const params = [];
-    if (search) params.push(`search=${search}`);
-    if (filterStatus) params.push(`status=${filterStatus}`);
-    if (params.length) url += '?' + params.join('&');
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    setPOs(Array.isArray(data) ? data : []);
   };
 
   const fetchProducts = async () => {
@@ -170,7 +182,7 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
       });
     }
     setShowModal(false);
-    fetchPOs();
+    refetchPOs();
   };
 
   const openDetail = async (row) => {
@@ -267,14 +279,14 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
   const handleClosePO = async (e) => {
     e.preventDefault();
     const res = await fetch(`/api/production-pos/${closeTargetPO.id}/close`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(closeForm) });
-    if (res.ok) { setShowCloseModal(false); fetchPOs(); }
+    if (res.ok) { setShowCloseModal(false); refetchPOs(); }
   };
 
   const handleDelete = async () => {
     if (!confirmDelete) return;
     await fetch(`/api/production-pos/${confirmDelete.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     setConfirmDelete(null);
-    fetchPOs();
+    refetchPOs();
   };
 
   const [expandedPOs, setExpandedPOs] = useState({});
@@ -388,18 +400,23 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
 
       <div className="flex gap-2 flex-wrap">
         {['', ...STATUS_OPTIONS].map(s => (
-          <button key={s} onClick={() => { setFilterStatus(s); setTimeout(fetchPOs, 0); }}
-            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${filterStatus === s ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{s || 'Semua'}</button>
+          <button key={s} onClick={() => setFilterStatus(s)}
+            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${filterStatus === s ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+            data-testid={`po-filter-${s || 'all'}`}>{s || 'Semua'}</button>
         ))}
       </div>
 
       <DataTable
         columns={columns}
-        data={pos}
         searchKeys={['po_number', 'customer_name']}
-        onSearch={fetchPOs}
         expandedRow={expandedRowRender}
         storageKey="productionPOs"
+        serverPagination={{
+          fetcher: posFetcher,
+          deps: [filterStatus, refetchKey],
+          itemLabel: 'PO',
+          initialSort: { key: 'created_at', dir: 'desc' },
+        }}
         actions={
           <div className="flex items-center gap-2">
             <ImportExportPanel 
@@ -407,7 +424,7 @@ export default function ProductionPOModule({ token, userRole, hasPerm = () => fa
               importType="production-pos" 
               exportType="production-pos" 
               exportFilters={{ status: filterStatus }}
-              onImportSuccess={() => fetchPOs()} 
+              onImportSuccess={() => refetchPOs()} 
             />
             {canCreate && (
               <button onClick={openCreate} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700" data-testid="create-po-btn"><Plus className="w-4 h-4" /> Buat PO</button>

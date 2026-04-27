@@ -1,14 +1,42 @@
 [
   {
-    "content": "Verify all audit bug fixes via testing agent (C-1, C-2, C-3, H-1 to H-4, M-1, M-3 + variance scenarios)",
+    "content": "Create reusable PaginationFooter component",
     "status": "completed"
   },
   {
-    "content": "Read test report & address any regressions/issues found",
+    "content": "Enhance DataTable.jsx with optional serverPagination mode (loading state, debounced search, server sort)",
     "status": "completed"
   },
   {
-    "content": "Update plan.md with verification results & confirm phase status",
+    "content": "Migrate ProductsModule to serverPagination",
     "status": "completed"
+  },
+  {
+    "content": "Migrate InvoiceModule to serverPagination (with status filter)",
+    "status": "completed"
+  },
+  {
+    "content": "Migrate ProductionPOModule to serverPagination (with status filter)",
+    "status": "completed"
+  },
+  {
+    "content": "Migrate ActivityLogModule with PaginationFooter (custom UI)",
+    "status": "completed"
+  },
+  {
+    "content": "Migrate PaymentModule with PaginationFooter (two tabs paginated independently)",
+    "status": "completed"
+  },
+  {
+    "content": "Lint frontend + verify no errors via esbuild",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 10B-rem: identify & batch-fix remaining N+1 in report endpoints",
+    "status": "completed"
+  },
+  {
+    "content": "Test all migrated screens via testing agent",
+    "status": "in_progress"
   }
 ]

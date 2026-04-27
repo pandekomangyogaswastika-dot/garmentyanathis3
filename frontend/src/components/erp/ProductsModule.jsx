@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState } from 'react';
 import { Plus, Pencil, Trash2, ChevronDown, ChevronRight, Camera, Upload, Image } from 'lucide-react';
 import DataTable from './DataTable';
 import Modal from './Modal';
@@ -7,7 +7,6 @@ import ConfirmDialog from './ConfirmDialog';
 import ImportExportPanel from './ImportExportPanel';
 
 export default function ProductsModule({ token, userRole, hasPerm = () => false }) {
-  const [products, setProducts] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [showVariantModal, setShowVariantModal] = useState(false);
   const [editData, setEditData] = useState(null);
@@ -19,18 +18,27 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
   const [variantForm, setVariantForm] = useState({ size: '', color: '', sku: '' });
   const [form, setForm] = useState({ product_code: '', product_name: '', category: '', cmt_price: '', selling_price: '', status: 'active' });
   const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef(null);
+  const [refetchKey, setRefetchKey] = useState(0);
 
   const isSuperAdmin = userRole === 'superadmin' || hasPerm('products.create');
   const canEdit = ['superadmin', 'admin'].includes(userRole) || hasPerm('products.edit');
 
-  useEffect(() => { fetchProducts(); }, []);
+  // Trigger DataTable serverPagination refetch after mutations
+  const refetchProducts = () => setRefetchKey((k) => k + 1);
 
-  const fetchProducts = async (search = '') => {
-    const url = search ? `/api/products?search=${search}` : '/api/products';
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    setProducts(Array.isArray(data) ? data : []);
+  // Server-paginated fetcher (Phase 10C)
+  const productsFetcher = async ({ page, per_page, sort_by, sort_dir, search }) => {
+    const params = new URLSearchParams();
+    params.set('page', String(page));
+    params.set('per_page', String(per_page));
+    if (sort_by) params.set('sort_by', sort_by);
+    if (sort_dir) params.set('sort_dir', sort_dir);
+    if (search) params.set('search', search);
+    const res = await fetch(`/api/products?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error('Gagal memuat produk');
+    return res.json();
   };
 
   const fetchVariants = async (productId) => {
@@ -64,14 +72,14 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
     const method = editData ? 'PUT' : 'POST';
     await fetch(url, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     setShowModal(false);
-    fetchProducts();
+    refetchProducts();
   };
 
   const handleDelete = async () => {
     if (!confirmDelete) return;
     await fetch(`/api/products/${confirmDelete.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     setConfirmDelete(null);
-    fetchProducts();
+    refetchProducts();
   };
 
   const handlePhotoUpload = async (productId, file) => {
@@ -85,7 +93,7 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
         headers: { Authorization: `Bearer ${token}` },
         body: formData
       });
-      if (res.ok) { fetchProducts(); }
+      if (res.ok) { refetchProducts(); }
       else { const d = await res.json(); alert(d.detail || 'Upload gagal'); }
     } catch (e) { alert('Upload error: ' + e.message); }
     finally { setUploading(false); }
@@ -172,10 +180,14 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
 
       <DataTable
         columns={columns}
-        data={products}
         searchKeys={['product_code', 'product_name', 'category']}
-        onSearch={fetchProducts}
         storageKey="products"
+        serverPagination={{
+          fetcher: productsFetcher,
+          deps: [refetchKey],
+          itemLabel: 'produk',
+          initialSort: { key: 'created_at', dir: 'desc' },
+        }}
         expandedRow={(row) => expandedProduct === row.id ? (
           <div className="bg-slate-50 border-t border-slate-100 p-4">
             <div className="flex items-center gap-4 mb-4">
@@ -212,7 +224,7 @@ export default function ProductsModule({ token, userRole, hasPerm = () => false 
         ) : null}
         actions={
           <div className="flex items-center gap-2">
-            <ImportExportPanel token={token} importType="products" exportType={null} onImportSuccess={() => fetchProducts()} />
+            <ImportExportPanel token={token} importType="products" exportType={null} onImportSuccess={() => refetchProducts()} />
             {isSuperAdmin && (
               <button onClick={openCreate} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700" data-testid="add-product-btn">
                 <Plus className="w-4 h-4" /> Tambah Produk

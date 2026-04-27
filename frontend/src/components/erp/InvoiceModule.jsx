@@ -1,5 +1,5 @@
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Eye, Pencil, Trash2 } from 'lucide-react';
 import DataTable from './DataTable';
 import Modal from './Modal';
@@ -7,25 +7,55 @@ import StatusBadge from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
 
 export default function InvoiceModule({ token, userRole, onNavigate }) {
-  const [invoices, setInvoices] = useState([]);
   const [showDetail, setShowDetail] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [detailData, setDetailData] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [filterStatus, setFilterStatus] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [refetchKey, setRefetchKey] = useState(0);
+  const [stats, setStats] = useState({ totalUnpaid: 0, totalPartial: 0 });
 
   const isSuperAdmin = userRole === 'superadmin';
 
-  useEffect(() => { fetchInvoices(); }, []);
+  const refetchInvoices = () => setRefetchKey((k) => k + 1);
 
-  const fetchInvoices = async () => {
-    let url = '/api/invoices';
-    if (filterStatus) url += `?status=${filterStatus}`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    setInvoices(Array.isArray(data) ? data : []);
-  };
+  // Server-paginated fetcher (Phase 10C)
+  const invoicesFetcher = useCallback(async ({ page, per_page, sort_by, sort_dir, search }) => {
+    const params = new URLSearchParams();
+    params.set('page', String(page));
+    params.set('per_page', String(per_page));
+    if (sort_by) params.set('sort_by', sort_by);
+    if (sort_dir) params.set('sort_dir', sort_dir);
+    if (search) params.set('search', search);
+    if (filterStatus) params.set('status', filterStatus);
+    const res = await fetch(`/api/invoices?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error('Gagal memuat invoice');
+    return res.json();
+  }, [filterStatus, token]);
+
+  // Lightweight stats fetcher — sums Unpaid/Partial outstanding amounts.
+  // Capped at per_page=200 (backend max). For most workflows the unpaid set is small.
+  const fetchStats = useCallback(async () => {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const [unpaidRes, partialRes] = await Promise.all([
+        fetch('/api/invoices?status=Unpaid&page=1&per_page=200', { headers }),
+        fetch('/api/invoices?status=Partial&page=1&per_page=200', { headers }),
+      ]);
+      const unpaidEnv = await unpaidRes.json();
+      const partialEnv = await partialRes.json();
+      const unpaidItems = Array.isArray(unpaidEnv?.items) ? unpaidEnv.items : (Array.isArray(unpaidEnv) ? unpaidEnv : []);
+      const partialItems = Array.isArray(partialEnv?.items) ? partialEnv.items : (Array.isArray(partialEnv) ? partialEnv : []);
+      const totalUnpaid = unpaidItems.reduce((s, i) => s + (i.total_amount || 0), 0);
+      const totalPartial = partialItems.reduce((s, i) => s + ((i.total_amount || 0) - (i.total_paid || 0)), 0);
+      setStats({ totalUnpaid, totalPartial });
+    } catch (e) { console.error('stats fetch failed', e); }
+  }, [token]);
+
+  useEffect(() => { fetchStats(); }, [fetchStats, refetchKey]);
 
   const openDetail = async (row) => {
     const res = await fetch(`/api/invoices/${row.id}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -48,7 +78,7 @@ export default function InvoiceModule({ token, userRole, onNavigate }) {
     if (res.ok) {
       alert('✅ Invoice berhasil diupdate');
       setShowEdit(false);
-      fetchInvoices();
+      refetchInvoices();
     } else {
       const err = await res.json();
       alert(`❌ Gagal update invoice: ${err.detail || 'Unknown error'}`);
@@ -62,14 +92,11 @@ export default function InvoiceModule({ token, userRole, onNavigate }) {
       headers: { Authorization: `Bearer ${token}` }
     });
     setConfirmDelete(null);
-    fetchInvoices();
+    refetchInvoices();
   };
 
   const fmt = (v) => 'Rp ' + (v||0).toLocaleString('id-ID');
   const fmtDate = (d) => d ? new Date(d).toLocaleDateString('id-ID') : '-';
-
-  const totalUnpaid = invoices.filter(i=>i.status==='Unpaid').reduce((s,i)=>s+(i.total_amount||0),0);
-  const totalPartial = invoices.filter(i=>i.status==='Partial').reduce((s,i)=>s+((i.total_amount||0)-(i.total_paid||0)),0);
 
   const columns = [
     { key: 'invoice_number', label: 'No. Invoice', render: (v) => <span className="font-bold text-blue-700">{v}</span> },
@@ -82,10 +109,10 @@ export default function InvoiceModule({ token, userRole, onNavigate }) {
     { key: 'status', label: 'Status', render: (v) => <StatusBadge status={v} /> },
     { key: 'created_at', label: 'Tanggal', render: (v) => fmtDate(v) },
     {
-      key: 'actions', label: 'Aksi',
+      key: 'actions', label: 'Aksi', sortable: false,
       render: (_, row) => (
         <div className="flex items-center gap-1">
-          <button onClick={() => openDetail(row)} className="p-1.5 rounded hover:bg-blue-50 text-blue-600" title="Detail">
+          <button onClick={() => openDetail(row)} className="p-1.5 rounded hover:bg-blue-50 text-blue-600" title="Detail" data-testid={`invoice-detail-${row.id}`}>
             <Eye className="w-4 h-4" />
           </button>
           {isSuperAdmin && (
@@ -118,29 +145,40 @@ export default function InvoiceModule({ token, userRole, onNavigate }) {
         )}
       </div>
 
-      {(totalUnpaid > 0 || totalPartial > 0) && (
+      {(stats.totalUnpaid > 0 || stats.totalPartial > 0) && (
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-red-50 border border-red-200 rounded-xl p-4">
             <p className="text-sm text-red-600">Belum Dibayar</p>
-            <p className="text-xl font-bold text-red-700 mt-1">{fmt(totalUnpaid)}</p>
+            <p className="text-xl font-bold text-red-700 mt-1" data-testid="invoice-stat-unpaid">{fmt(stats.totalUnpaid)}</p>
           </div>
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
             <p className="text-sm text-amber-600">Sebagian Dibayar</p>
-            <p className="text-xl font-bold text-amber-700 mt-1">{fmt(totalPartial)}</p>
+            <p className="text-xl font-bold text-amber-700 mt-1" data-testid="invoice-stat-partial">{fmt(stats.totalPartial)}</p>
           </div>
         </div>
       )}
 
       <div className="flex gap-2">
         {['','Unpaid','Partial','Paid'].map(s => (
-          <button key={s} onClick={() => { setFilterStatus(s); setTimeout(fetchInvoices, 0); }}
+          <button key={s} onClick={() => setFilterStatus(s)}
             className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
               filterStatus===s ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-            }`}>{s || 'Semua'}</button>
+            }`}
+            data-testid={`invoice-filter-${s || 'all'}`}>{s || 'Semua'}</button>
         ))}
       </div>
 
-      <DataTable columns={columns} data={invoices} searchKeys={['invoice_number','garment_name','po_number']} storageKey="invoices" />
+      <DataTable
+        columns={columns}
+        searchKeys={['invoice_number','garment_name','po_number']}
+        storageKey="invoices"
+        serverPagination={{
+          fetcher: invoicesFetcher,
+          deps: [filterStatus, refetchKey],
+          itemLabel: 'invoice',
+          initialSort: { key: 'created_at', dir: 'desc' },
+        }}
+      />
 
       {showEdit && isSuperAdmin && (
         <Modal title="Edit Invoice" onClose={() => setShowEdit(false)}>

@@ -3561,13 +3561,19 @@ async def get_report(report_type: str, request: Request):
     if report_type == 'production':
         po_query = {}
         if sp.get('status'): po_query['status'] = sp['status']
+        if sp.get('vendor_id'): po_query['vendor_id'] = sp['vendor_id']
         pos = await db.production_pos.find(po_query, {'_id': 0}).sort('created_at', -1).to_list(None)
+        # ─── 10B-rem: batch-fetch po_items for all POs at once ───
+        po_ids = [po['id'] for po in pos]
+        all_items = await db.po_items.find({'po_id': {'$in': po_ids}}, {'_id': 0}).to_list(None) if po_ids else []
+        items_by_po = {}
+        for it in all_items:
+            items_by_po.setdefault(it['po_id'], []).append(it)
         rows = []
+        serial_filter = sp.get('serial_number')
         for po in pos:
-            if sp.get('vendor_id') and po.get('vendor_id') != sp['vendor_id']: continue
-            items = await db.po_items.find({'po_id': po['id']}).to_list(None)
-            for item in items:
-                if sp.get('serial_number') and item.get('serial_number') != sp['serial_number']: continue
+            for item in items_by_po.get(po['id'], []):
+                if serial_filter and item.get('serial_number') != serial_filter: continue
                 rows.append({
                     'tanggal': serialize_doc(po.get('po_date', po.get('created_at'))),
                     'no_po': po.get('po_number'), 'no_seri': item.get('serial_number', ''),
@@ -3607,19 +3613,27 @@ async def get_report(report_type: str, request: Request):
         return rows
     if report_type == 'progress':
         progs = await db.production_progress.find({}, {'_id': 0}).sort('progress_date', -1).to_list(None)
+        # ─── 10B-rem: batch-fetch all referenced job_items + jobs ───
+        ji_ids = list({p['job_item_id'] for p in progs if p.get('job_item_id')})
+        job_ids = list({p['job_id'] for p in progs if p.get('job_id')})
+        ji_docs = await db.production_job_items.find({'id': {'$in': ji_ids}}, {'_id': 0}).to_list(None) if ji_ids else []
+        job_docs = await db.production_jobs.find({'id': {'$in': job_ids}}, {'_id': 0}).to_list(None) if job_ids else []
+        ji_map = {d['id']: d for d in ji_docs}
+        job_map = {d['id']: d for d in job_docs}
         rows = []
+        vendor_filter = sp.get('vendor_id')
         for p in progs:
-            ji = await db.production_job_items.find_one({'id': p.get('job_item_id')}) if p.get('job_item_id') else None
-            job = await db.production_jobs.find_one({'id': p.get('job_id')}) if p.get('job_id') else None
-            if sp.get('vendor_id') and (job or {}).get('vendor_id') != sp['vendor_id']: continue
+            ji = ji_map.get(p.get('job_item_id'), {}) if p.get('job_item_id') else {}
+            job = job_map.get(p.get('job_id'), {}) if p.get('job_id') else {}
+            if vendor_filter and job.get('vendor_id') != vendor_filter: continue
             rows.append({
                 'date': serialize_doc(p.get('progress_date')),
-                'job_number': (job or {}).get('job_number', ''),
-                'po_number': (job or {}).get('po_number', ''),
-                'vendor_name': (job or {}).get('vendor_name', ''),
-                'serial_number': (ji or {}).get('serial_number', ''),
-                'sku': (ji or {}).get('sku', p.get('sku', '')),
-                'product_name': (ji or {}).get('product_name', p.get('product_name', '')),
+                'job_number': job.get('job_number', ''),
+                'po_number': job.get('po_number', ''),
+                'vendor_name': job.get('vendor_name', ''),
+                'serial_number': ji.get('serial_number', ''),
+                'sku': ji.get('sku', p.get('sku', '')),
+                'product_name': ji.get('product_name', p.get('product_name', '')),
                 'qty_progress': p.get('completed_quantity', 0),
                 'notes': p.get('notes', ''), 'recorded_by': p.get('recorded_by', '')
             })
@@ -3640,16 +3654,23 @@ async def get_report(report_type: str, request: Request):
         return rows
     if report_type == 'return':
         returns = await db.production_returns.find({}, {'_id': 0}).sort('created_at', -1).to_list(None)
+        # ─── 10B-rem: batch-aggregate return_items in 1 query ───
+        ret_ids = [r['id'] for r in returns]
+        ret_agg = await db.production_return_items.aggregate([
+            {'$match': {'return_id': {'$in': ret_ids}}},
+            {'$group': {'_id': '$return_id', 'qty': {'$sum': '$return_qty'}, 'cnt': {'$sum': 1}}},
+        ]).to_list(None) if ret_ids else []
+        ret_map = {a['_id']: a for a in ret_agg}
         rows = []
         for r in returns:
-            items = await db.production_return_items.find({'return_id': r['id']}).to_list(None)
+            agg = ret_map.get(r['id'], {'qty': 0, 'cnt': 0})
             rows.append({
                 'return_number': r.get('return_number', ''),
                 'po_number': r.get('reference_po_number', ''),
                 'customer_name': r.get('customer_name', ''),
                 'return_date': serialize_doc(r.get('return_date')),
-                'total_qty': sum(i.get('return_qty', 0) for i in items),
-                'item_count': len(items), 'reason': r.get('return_reason', ''),
+                'total_qty': agg['qty'],
+                'item_count': agg['cnt'], 'reason': r.get('return_reason', ''),
                 'status': r.get('status', ''), 'notes': r.get('notes', '')
             })
         return rows
@@ -3710,38 +3731,74 @@ async def production_monitoring(request: Request):
     g_query = {'status': 'active'}
     if sp.get('vendor_id'): g_query['id'] = sp['vendor_id']
     garments = await db.garments.find(g_query, {'_id': 0}).to_list(None)
+    if not garments: return []
+    garment_ids = [g['id'] for g in garments]
+
+    # ─── 10B-rem: batch-fetch all jobs (parents + children) for the requested vendors ───
+    all_jobs = await db.production_jobs.find(
+        {'vendor_id': {'$in': garment_ids}}, {'_id': 0}
+    ).sort('created_at', -1).to_list(None)
+    parent_jobs_by_vendor = {}
+    children_by_parent = {}
+    for j in all_jobs:
+        pid = j.get('parent_job_id')
+        if not pid:
+            parent_jobs_by_vendor.setdefault(j.get('vendor_id'), []).append(j)
+        else:
+            children_by_parent.setdefault(pid, []).append(j)
+
+    # Batch-fetch all job_items for any of these jobs in one query
+    all_job_ids = [j['id'] for j in all_jobs]
+    all_job_items = await db.production_job_items.find(
+        {'job_id': {'$in': all_job_ids}}, {'_id': 0}
+    ).to_list(None) if all_job_ids else []
+    items_by_job = {}
+    for it in all_job_items:
+        items_by_job.setdefault(it.get('job_id'), []).append(it)
+
+    # Aggregate buyer-shipped per po_item_id once
+    po_item_ids = list({i.get('po_item_id') for i in all_job_items if i.get('po_item_id')})
+    buyer_agg = await db.buyer_shipment_items.aggregate([
+        {'$match': {'po_item_id': {'$in': po_item_ids}}},
+        {'$group': {'_id': '$po_item_id', 'qty': {'$sum': '$qty_shipped'}}},
+    ]).to_list(None) if po_item_ids else []
+    buyer_by_poitem = {a['_id']: a['qty'] for a in buyer_agg}
+
     result = []
     for g in garments:
-        parent_jobs = await db.production_jobs.find({
-            'vendor_id': g['id'],
-            '$or': [{'parent_job_id': None}, {'parent_job_id': ''}, {'parent_job_id': {'$exists': False}}]
-        }, {'_id': 0}).sort('created_at', -1).to_list(None)
+        parent_jobs = parent_jobs_by_vendor.get(g['id'], [])
         if not parent_jobs: continue
-        all_job_items = []
+        total_qty = 0
+        total_produced = 0
+        total_shipped_to_buyer_set = set()  # avoid double counting buyer ship across child jobs sharing po_item_id
+        running_shipped = 0
         for job in parent_jobs:
-            items = await db.production_job_items.find({'job_id': job['id']}, {'_id': 0}).to_list(None)
-            child_jobs = await db.production_jobs.find({'parent_job_id': job['id']}).to_list(None)
+            items = items_by_job.get(job['id'], [])
+            child_jobs = children_by_parent.get(job['id'], [])
+            child_items_for_parent = []
+            for cj in child_jobs:
+                child_items_for_parent.extend(items_by_job.get(cj['id'], []))
             for item in items:
-                child_produced = 0
-                for cj in child_jobs:
-                    cji = await db.production_job_items.find_one({'job_id': cj['id'], 'po_item_id': item.get('po_item_id')}) if item.get('po_item_id') else None
-                    if cji: child_produced += cji.get('produced_qty', 0)
+                # Total produced for this po_item across this parent + its child jobs
+                child_produced = sum(
+                    ci.get('produced_qty', 0)
+                    for ci in child_items_for_parent
+                    if ci.get('po_item_id') and ci.get('po_item_id') == item.get('po_item_id')
+                )
                 total_prod = (item.get('produced_qty', 0)) + child_produced
-                # Get shipped to buyer for this item
-                shipped_to_buyer = 0
-                if item.get('po_item_id'):
-                    buyer_items = await db.buyer_shipment_items.find({'po_item_id': item['po_item_id']}).to_list(None)
-                    shipped_to_buyer = sum(bi.get('qty_shipped', 0) for bi in buyer_items)
-                all_job_items.append({**item, 'total_produced_qty': total_prod, 'shipped_to_buyer_qty': shipped_to_buyer, 'job': job})
-        total_qty = sum(i.get('ordered_qty', 0) for i in all_job_items)
-        total_produced = sum(i.get('total_produced_qty', 0) for i in all_job_items)
-        total_shipped_to_buyer = sum(i.get('shipped_to_buyer_qty', 0) for i in all_job_items)
+                # Buyer shipped per po_item_id, count only once per po_item across the result
+                poi = item.get('po_item_id')
+                if poi and poi not in total_shipped_to_buyer_set:
+                    running_shipped += buyer_by_poitem.get(poi, 0)
+                    total_shipped_to_buyer_set.add(poi)
+                total_qty += item.get('ordered_qty', 0)
+                total_produced += total_prod
         pct = round((total_produced / total_qty * 100) if total_qty > 0 else 0)
         result.append({
             'vendor_id': g['id'], 'vendor_name': g.get('garment_name'),
             'vendor_code': g.get('garment_code'), 'location': g.get('location', ''),
             'total_jobs': len(parent_jobs), 'total_qty': total_qty,
-            'total_produced': total_produced, 'total_shipped_to_buyer': total_shipped_to_buyer,
+            'total_produced': total_produced, 'total_shipped_to_buyer': running_shipped,
             'progress_pct': pct,
             'jobs_by_status': {
                 'in_progress': len([j for j in parent_jobs if j.get('status') == 'In Progress']),
@@ -3761,32 +3818,70 @@ async def distribusi_kerja(request: Request):
     if sp.get('vendor_id'): po_query['vendor_id'] = sp['vendor_id']
     if sp.get('po_id'): po_query['id'] = sp['po_id']
     pos = await db.production_pos.find(po_query, {'_id': 0}).sort('created_at', -1).to_list(None)
+    if not pos: return {'hierarchy': [], 'flat': [], 'invalid_records': []}
+
+    # ─── 10B-rem: batch every dependency in one shot ───
+    po_ids = [po['id'] for po in pos]
+    all_po_items = await db.po_items.find({'po_id': {'$in': po_ids}}).to_list(None)
+    po_item_ids = [pi['id'] for pi in all_po_items]
+    items_by_po = {}
+    for pi in all_po_items:
+        items_by_po.setdefault(pi.get('po_id'), []).append(pi)
+
+    # qty_sent per po_item (single aggregation)
+    sent_agg = await db.vendor_shipment_items.aggregate([
+        {'$match': {'po_item_id': {'$in': po_item_ids}}},
+        {'$group': {'_id': '$po_item_id', 'qty': {'$sum': '$qty_sent'}}},
+    ]).to_list(None) if po_item_ids else []
+    sent_by_poitem = {a['_id']: a['qty'] for a in sent_agg}
+
+    # produced_qty per po_item
+    prod_agg = await db.production_job_items.aggregate([
+        {'$match': {'po_item_id': {'$in': po_item_ids}}},
+        {'$group': {'_id': '$po_item_id', 'qty': {'$sum': '$produced_qty'}}},
+    ]).to_list(None) if po_item_ids else []
+    prod_by_poitem = {a['_id']: a['qty'] for a in prod_agg}
+
+    # shipped_to_buyer per po_item
+    buyer_agg = await db.buyer_shipment_items.aggregate([
+        {'$match': {'po_item_id': {'$in': po_item_ids}}},
+        {'$group': {'_id': '$po_item_id', 'qty': {'$sum': '$qty_shipped'}}},
+    ]).to_list(None) if po_item_ids else []
+    buyer_by_poitem = {a['_id']: a['qty'] for a in buyer_agg}
+
+    # received_qty: join shipment_items -> inspections -> inspection_items
+    # Step 1 — pull all shipment items for these po_items
+    all_ship_items = await db.vendor_shipment_items.find(
+        {'po_item_id': {'$in': po_item_ids}}, {'_id': 0}
+    ).to_list(None) if po_item_ids else []
+    ship_ids = list({si.get('shipment_id') for si in all_ship_items if si.get('shipment_id')})
+    # Step 2 — find inspections for those shipments in 1 query
+    inspections = await db.vendor_material_inspections.find(
+        {'shipment_id': {'$in': ship_ids}}, {'_id': 0, 'id': 1, 'shipment_id': 1}
+    ).to_list(None) if ship_ids else []
+    insp_id_by_ship = {i['shipment_id']: i['id'] for i in inspections}
+    insp_ids = list(insp_id_by_ship.values())
+    # Step 3 — fetch all inspection items keyed by shipment_item_id
+    insp_items = await db.vendor_material_inspection_items.find(
+        {'inspection_id': {'$in': insp_ids}}, {'_id': 0, 'shipment_item_id': 1, 'received_qty': 1}
+    ).to_list(None) if insp_ids else []
+    received_by_shipitem = {ii['shipment_item_id']: ii.get('received_qty', 0) for ii in insp_items if ii.get('shipment_item_id')}
+    # Step 4 — sum received_qty per po_item via shipment_item linkage
+    received_by_poitem = {}
+    for si in all_ship_items:
+        poi = si.get('po_item_id')
+        if not poi: continue
+        received_by_poitem[poi] = received_by_poitem.get(poi, 0) + received_by_shipitem.get(si.get('id'), 0)
+
     flat_rows = []
     for po in pos:
-        po_items = await db.po_items.find({'po_id': po['id']}).to_list(None)
-        for pi in po_items:
-            # Aggregate received across ALL shipments (parent + child) for this po_item_id
-            all_ship_items = await db.vendor_shipment_items.find({'po_item_id': pi['id']}).to_list(None)
-            total_received = 0
-            total_sent = 0
-            for si in all_ship_items:
-                total_sent += si.get('qty_sent', 0)
-                insp = await db.vendor_material_inspections.find_one({'shipment_id': si.get('shipment_id')})
-                if insp:
-                    ii = await db.vendor_material_inspection_items.find_one({
-                        'inspection_id': insp['id'], 'shipment_item_id': si['id']})
-                    if ii:
-                        total_received += ii.get('received_qty', 0)
-            # Get production info
-            ji_list = await db.production_job_items.find({'po_item_id': pi['id']}).to_list(None)
-            produced_qty = sum(j.get('produced_qty', 0) for j in ji_list)
-            # Get shipped to buyer info (from buyer_shipment_items)
-            buyer_items = await db.buyer_shipment_items.find({'po_item_id': pi['id']}).to_list(None)
-            shipped_to_buyer_qty = sum(bi.get('qty_shipped', 0) for bi in buyer_items)
+        for pi in items_by_po.get(po['id'], []):
+            poi = pi['id']
             ordered_qty = pi.get('qty', 0)
+            produced_qty = prod_by_poitem.get(poi, 0)
             progress_pct = round((produced_qty / ordered_qty * 100) if ordered_qty > 0 else 0)
             flat_rows.append({
-                'id': pi['id'], 'po_item_id': pi['id'],
+                'id': poi, 'po_item_id': poi,
                 'vendor_id': po.get('vendor_id'), 'vendor_name': po.get('vendor_name', ''),
                 'po_id': po['id'], 'po_number': po.get('po_number', ''),
                 'po_date': serialize_doc(po.get('created_at')),
@@ -3794,9 +3889,11 @@ async def distribusi_kerja(request: Request):
                 'serial_number': pi.get('serial_number', ''),
                 'product_name': pi.get('product_name', ''), 'sku': pi.get('sku', ''),
                 'size': pi.get('size', ''), 'color': pi.get('color', ''),
-                'ordered_qty': ordered_qty, 'shipment_qty': total_sent,
-                'received_qty': total_received, 'produced_qty': produced_qty,
-                'shipped_to_buyer_qty': shipped_to_buyer_qty,
+                'ordered_qty': ordered_qty,
+                'shipment_qty': sent_by_poitem.get(poi, 0),
+                'received_qty': received_by_poitem.get(poi, 0),
+                'produced_qty': produced_qty,
+                'shipped_to_buyer_qty': buyer_by_poitem.get(poi, 0),
                 'progress_pct': progress_pct,
             })
     # Build hierarchy

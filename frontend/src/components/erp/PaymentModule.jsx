@@ -1,7 +1,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ArrowDownCircle, ArrowUpCircle, RefreshCw, Eye, CreditCard, DollarSign, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Plus, ArrowDownCircle, ArrowUpCircle, RefreshCw, CreditCard, DollarSign, Loader2 } from 'lucide-react';
 import Modal from './Modal';
+import PaginationFooter from './PaginationFooter';
 
 const PAYMENT_METHODS = ['Transfer Bank', 'Cek/Giro', 'Cash', 'Kartu Kredit', 'Lainnya'];
 const FILTER_OPTIONS = [
@@ -27,14 +28,20 @@ const fmt = (v) => 'Rp ' + Number(v || 0).toLocaleString('id-ID');
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('id-ID') : '-';
 
 export default function PaymentModule({ token, userRole, prefillInvoice }) {
-  const [vendorPayments, setVendorPayments] = useState([]);
-  const [customerPayments, setCustomerPayments] = useState([]);
-  const [invoices, setInvoices] = useState([]);
+  const [payments, setPayments] = useState([]); // current tab's paginated rows
+  const [invoices, setInvoices] = useState([]); // for modal dropdown only
+  const [stats, setStats] = useState({ totalCashIn: 0, totalCashOut: 0, vendorCount: 0, customerCount: 0 });
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('vendor'); // 'vendor' | 'customer'
+  const [activeTab, setActiveTab] = useState('vendor');
   const [filter, setFilter] = useState('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
+
+  // Pagination state per tab
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(20);
+  const [total, setTotal] = useState(0);
+
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({
     invoice_id: '', payment_date: new Date().toISOString().split('T')[0],
@@ -45,27 +52,88 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
 
   const canEdit = ['superadmin', 'admin', 'finance'].includes(userRole);
 
-  const fetchAll = useCallback(async () => {
+  const dateParams = useCallback(() => {
+    const range = filter === 'custom' ? { date_from: customFrom, date_to: customTo } : getDateRange(filter);
+    const p = new URLSearchParams();
+    if (range.date_from) p.set('date_from', range.date_from);
+    if (range.date_to) p.set('date_to', range.date_to);
+    return p;
+  }, [filter, customFrom, customTo]);
+
+  // Paginated fetch for the active tab only
+  const fetchPayments = useCallback(async () => {
     setLoading(true);
     try {
-      const range = filter === 'custom' ? { date_from: customFrom, date_to: customTo } : getDateRange(filter);
-      const params = new URLSearchParams();
-      if (range.date_from) params.set('date_from', range.date_from);
-      if (range.date_to) params.set('date_to', range.date_to);
+      const paymentType = activeTab === 'vendor' ? 'VENDOR_PAYMENT' : 'CUSTOMER_PAYMENT';
+      const params = dateParams();
+      params.set('payment_type', paymentType);
+      params.set('page', String(page));
+      params.set('per_page', String(perPage));
+      params.set('sort_by', 'payment_date');
+      params.set('sort_dir', 'desc');
+      const res = await fetch(`/api/payments?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (data && Array.isArray(data.items)) {
+        setPayments(data.items);
+        setTotal(data.total || 0);
+      } else if (Array.isArray(data)) {
+        setPayments(data);
+        setTotal(data.length);
+      } else {
+        setPayments([]); setTotal(0);
+      }
+    } catch (e) {
+      console.error(e);
+      setPayments([]); setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [token, activeTab, page, perPage, dateParams]);
 
-      const [vpRes, cpRes, invRes] = await Promise.all([
-        fetch(`/api/payments?payment_type=VENDOR_PAYMENT&${params}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`/api/payments?payment_type=CUSTOMER_PAYMENT&${params}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/api/invoices', { headers: { Authorization: `Bearer ${token}` } })
+  // Aggregate KPIs across both tabs (within date range). Capped at per_page=200.
+  const fetchStats = useCallback(async () => {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const buildUrl = (type) => {
+        const p = dateParams();
+        p.set('payment_type', type);
+        p.set('page', '1');
+        p.set('per_page', '200');
+        return `/api/payments?${p.toString()}`;
+      };
+      const [vRes, cRes] = await Promise.all([
+        fetch(buildUrl('VENDOR_PAYMENT'), { headers }),
+        fetch(buildUrl('CUSTOMER_PAYMENT'), { headers }),
       ]);
-      const [vpData, cpData, invData] = await Promise.all([vpRes.json(), cpRes.json(), invRes.json()]);
-      setVendorPayments(Array.isArray(vpData) ? vpData : []);
-      setCustomerPayments(Array.isArray(cpData) ? cpData : []);
-      setInvoices(Array.isArray(invData) ? invData.filter(i => i.status !== 'Paid' && i.status !== 'Superseded') : []);
-    } catch (e) { console.error(e); } finally { setLoading(false); }
-  }, [token, filter, customFrom, customTo]);
+      const vEnv = await vRes.json();
+      const cEnv = await cRes.json();
+      const vItems = Array.isArray(vEnv?.items) ? vEnv.items : (Array.isArray(vEnv) ? vEnv : []);
+      const cItems = Array.isArray(cEnv?.items) ? cEnv.items : (Array.isArray(cEnv) ? cEnv : []);
+      setStats({
+        totalCashOut: vItems.reduce((s, p) => s + (p.amount || 0), 0),
+        totalCashIn: cItems.reduce((s, p) => s + (p.amount || 0), 0),
+        vendorCount: typeof vEnv?.total === 'number' ? vEnv.total : vItems.length,
+        customerCount: typeof cEnv?.total === 'number' ? cEnv.total : cItems.length,
+      });
+    } catch (_) { /* non-critical */ }
+  }, [token, dateParams]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  // Invoice list for the modal — only unpaid/partial, capped 200
+  const fetchInvoices = useCallback(async () => {
+    try {
+      const res = await fetch('/api/invoices?page=1&per_page=200', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+      setInvoices(items.filter(i => i.status !== 'Paid' && i.status !== 'Superseded'));
+    } catch (_) { setInvoices([]); }
+  }, [token]);
+
+  useEffect(() => { fetchPayments(); }, [fetchPayments]);
+  useEffect(() => { fetchStats(); }, [fetchStats]);
+  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+
+  // Reset to page 1 when tab or date filter changes
+  useEffect(() => { setPage(1); }, [activeTab, filter, customFrom, customTo]);
 
   useEffect(() => {
     if (prefillInvoice) {
@@ -78,13 +146,9 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
 
   const vendorInvoices = invoices.filter(i => i.invoice_category === 'VENDOR' || i.invoice_type === 'vendor' || (!i.invoice_category && i.invoice_type !== 'customer'));
   const customerInvoices = invoices.filter(i => i.invoice_category === 'BUYER' || i.invoice_type === 'customer');
-
   const activeInvoices = form.payment_type === 'VENDOR_PAYMENT' ? vendorInvoices : customerInvoices;
   const selectedInv = invoices.find(i => i.id === form.invoice_id) || null;
   const outstanding = selectedInv ? (selectedInv.total_amount || 0) - (selectedInv.total_paid || 0) : 0;
-
-  const totalCashOut = vendorPayments.reduce((s, p) => s + (p.amount || 0), 0);
-  const totalCashIn = customerPayments.reduce((s, p) => s + (p.amount || 0), 0);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -99,11 +163,13 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
     });
     const data = await res.json();
     setSaving(false);
-    if (!res.ok) { alert(data.error || 'Gagal menyimpan'); return; }
+    if (!res.ok) { alert(data.detail || data.error || 'Gagal menyimpan'); return; }
     setShowModal(false);
     setForm({ invoice_id: '', payment_date: new Date().toISOString().split('T')[0], amount: '', payment_method: 'Transfer Bank', reference_number: '', notes: '', payment_type: 'VENDOR_PAYMENT' });
     setAmountError('');
-    fetchAll();
+    fetchPayments();
+    fetchStats();
+    fetchInvoices();
   };
 
   const openCreate = (type) => {
@@ -112,7 +178,7 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
     setShowModal(true);
   };
 
-  const displayPayments = activeTab === 'vendor' ? vendorPayments : customerPayments;
+  const refreshAll = () => { fetchPayments(); fetchStats(); fetchInvoices(); };
 
   return (
     <div className="space-y-6">
@@ -130,8 +196,8 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs text-emerald-600 font-medium">Total Cash In</p>
-              <p className="text-2xl font-bold text-emerald-700 mt-1">{fmt(totalCashIn)}</p>
-              <p className="text-xs text-emerald-500 mt-0.5">{customerPayments.length} transaksi dari customer</p>
+              <p className="text-2xl font-bold text-emerald-700 mt-1" data-testid="payment-stat-cash-in">{fmt(stats.totalCashIn)}</p>
+              <p className="text-xs text-emerald-500 mt-0.5">{stats.customerCount} transaksi dari customer</p>
             </div>
             <ArrowDownCircle className="w-8 h-8 text-emerald-500" />
           </div>
@@ -140,20 +206,20 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs text-red-600 font-medium">Total Cash Out</p>
-              <p className="text-2xl font-bold text-red-700 mt-1">{fmt(totalCashOut)}</p>
-              <p className="text-xs text-red-500 mt-0.5">{vendorPayments.length} transaksi ke vendor</p>
+              <p className="text-2xl font-bold text-red-700 mt-1" data-testid="payment-stat-cash-out">{fmt(stats.totalCashOut)}</p>
+              <p className="text-xs text-red-500 mt-0.5">{stats.vendorCount} transaksi ke vendor</p>
             </div>
             <ArrowUpCircle className="w-8 h-8 text-red-500" />
           </div>
         </div>
-        <div className={`border rounded-xl p-4 ${(totalCashIn - totalCashOut) >= 0 ? 'bg-blue-50 border-blue-200' : 'bg-orange-50 border-orange-200'}`}>
+        <div className={`border rounded-xl p-4 ${(stats.totalCashIn - stats.totalCashOut) >= 0 ? 'bg-blue-50 border-blue-200' : 'bg-orange-50 border-orange-200'}`}>
           <div className="flex items-center justify-between">
             <div>
-              <p className={`text-xs font-medium ${(totalCashIn - totalCashOut) >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>Net Cash Flow</p>
-              <p className={`text-2xl font-bold mt-1 ${(totalCashIn - totalCashOut) >= 0 ? 'text-blue-700' : 'text-orange-700'}`}>{fmt(totalCashIn - totalCashOut)}</p>
+              <p className={`text-xs font-medium ${(stats.totalCashIn - stats.totalCashOut) >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>Net Cash Flow</p>
+              <p className={`text-2xl font-bold mt-1 ${(stats.totalCashIn - stats.totalCashOut) >= 0 ? 'text-blue-700' : 'text-orange-700'}`}>{fmt(stats.totalCashIn - stats.totalCashOut)}</p>
               <p className="text-xs text-slate-500 mt-0.5">Cash In − Cash Out</p>
             </div>
-            <DollarSign className={`w-8 h-8 ${(totalCashIn - totalCashOut) >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
+            <DollarSign className={`w-8 h-8 ${(stats.totalCashIn - stats.totalCashOut) >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
           </div>
         </div>
       </div>
@@ -164,7 +230,8 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
           <span className="text-xs text-slate-500 font-semibold">Periode:</span>
           {FILTER_OPTIONS.map(opt => (
             <button key={opt.value} onClick={() => setFilter(opt.value)}
-              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${filter === opt.value ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${filter === opt.value ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+              data-testid={`payment-filter-${opt.value}`}>
               {opt.label}
             </button>
           ))}
@@ -173,10 +240,10 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
               <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" />
               <span className="text-slate-400 text-sm">—</span>
               <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" />
-              <button onClick={fetchAll} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">OK</button>
+              <button onClick={refreshAll} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">OK</button>
             </div>
           )}
-          <button onClick={fetchAll} className="ml-auto flex items-center gap-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">
+          <button onClick={refreshAll} className="ml-auto flex items-center gap-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50" data-testid="payment-refresh">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
@@ -185,14 +252,16 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
       {/* Tab switcher */}
       <div className="flex gap-1 bg-slate-100 rounded-xl p-1">
         <button onClick={() => setActiveTab('vendor')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'vendor' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}>
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'vendor' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}
+          data-testid="payment-tab-vendor">
           <ArrowUpCircle className="w-4 h-4" />
-          Cash Out — Vendor Payments ({vendorPayments.length})
+          Cash Out — Vendor Payments ({stats.vendorCount})
         </button>
         <button onClick={() => setActiveTab('customer')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'customer' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}>
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'customer' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}
+          data-testid="payment-tab-customer">
           <ArrowDownCircle className="w-4 h-4" />
-          Cash In — Customer Payments ({customerPayments.length})
+          Cash In — Customer Payments ({stats.customerCount})
         </button>
       </div>
 
@@ -201,7 +270,8 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
         <div className="flex justify-end">
           <button
             onClick={() => openCreate(activeTab === 'vendor' ? 'VENDOR_PAYMENT' : 'CUSTOMER_PAYMENT')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white ${activeTab === 'vendor' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white ${activeTab === 'vendor' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+            data-testid="payment-add-btn">
             <Plus className="w-4 h-4" />
             {activeTab === 'vendor' ? 'Bayar Vendor (Cash Out)' : 'Terima dari Customer (Cash In)'}
           </button>
@@ -209,56 +279,65 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
       )}
 
       {/* Payment Table */}
-      {loading ? (
-        <div className="text-center py-16"><RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-slate-400" /></div>
-      ) : displayPayments.length === 0 ? (
-        <div className="text-center py-16 text-slate-400">
-          <CreditCard className="w-12 h-12 mx-auto mb-3 opacity-30" />
-          <p>Belum ada {activeTab === 'vendor' ? 'pembayaran ke vendor' : 'penerimaan dari customer'}</p>
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+        <div className={`px-4 py-2 border-b font-semibold text-sm ${activeTab === 'vendor' ? 'bg-red-50 text-red-700 border-red-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
+          {activeTab === 'vendor' ? '↑ Cash Out — Pembayaran ke Vendor' : '↓ Cash In — Penerimaan dari Customer'}
         </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-          <div className={`px-4 py-2 border-b font-semibold text-sm ${activeTab === 'vendor' ? 'bg-red-50 text-red-700 border-red-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
-            {activeTab === 'vendor' ? '↑ Cash Out — Pembayaran ke Vendor' : '↓ Cash In — Penerimaan dari Customer'}
+        {loading ? (
+          <div className="text-center py-16">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-slate-400" />
           </div>
+        ) : payments.length === 0 ? (
+          <div className="text-center py-16 text-slate-400">
+            <CreditCard className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p>Belum ada {activeTab === 'vendor' ? 'pembayaran ke vendor' : 'penerimaan dari customer'}</p>
+          </div>
+        ) : (
           <table className="w-full text-sm">
             <thead className="bg-slate-50 border-b">
               <tr>
                 {activeTab === 'vendor'
-                  ? ['Vendor', 'No. Invoice', 'Jumlah Bayar', 'Sisa Hutang', 'Tanggal', 'Metode', 'Referensi'].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>)
-                  : ['Customer', 'No. Invoice', 'Jumlah Terima', 'Sisa Piutang', 'Tanggal', 'Metode', 'Referensi'].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>)
+                  ? ['Vendor', 'No. Invoice', 'Jumlah Bayar', 'Tanggal', 'Metode', 'Referensi'].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>)
+                  : ['Customer', 'No. Invoice', 'Jumlah Terima', 'Tanggal', 'Metode', 'Referensi'].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>)
                 }
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {displayPayments.map(p => {
-                const inv = invoices.find(i => i.id === p.invoice_id);
-                const remaining = inv ? Math.max(0, (inv.total_amount || 0) - (inv.total_paid || 0)) : null;
-                return (
-                  <tr key={p.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-medium text-slate-800">{p.vendor_or_customer_name || p.garment_name || '-'}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-blue-700">{p.invoice_number}</td>
-                    <td className={`px-4 py-3 font-bold ${activeTab === 'vendor' ? 'text-red-700' : 'text-emerald-700'}`}>{fmt(p.amount)}</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">{remaining !== null ? fmt(remaining) : '-'}</td>
-                    <td className="px-4 py-3 text-xs text-slate-500">{fmtDate(p.payment_date)}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{p.payment_method}</td>
-                    <td className="px-4 py-3 text-xs text-slate-400 font-mono">{p.reference_number || p.reference || '-'}</td>
-                  </tr>
-                );
-              })}
+              {payments.map(p => (
+                <tr key={p.id} className="hover:bg-slate-50" data-testid={`payment-row-${p.id}`}>
+                  <td className="px-4 py-3 font-medium text-slate-800">{p.vendor_or_customer_name || p.garment_name || '-'}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-blue-700">{p.invoice_number}</td>
+                  <td className={`px-4 py-3 font-bold ${activeTab === 'vendor' ? 'text-red-700' : 'text-emerald-700'}`}>{fmt(p.amount)}</td>
+                  <td className="px-4 py-3 text-xs text-slate-500">{fmtDate(p.payment_date)}</td>
+                  <td className="px-4 py-3 text-xs text-slate-600">{p.payment_method}</td>
+                  <td className="px-4 py-3 text-xs text-slate-400 font-mono">{p.reference_number || p.reference || '-'}</td>
+                </tr>
+              ))}
             </tbody>
             <tfoot className="bg-slate-50 border-t-2 border-slate-200">
               <tr>
-                <td className="px-4 py-2 font-bold text-slate-700" colSpan={2}>Total ({displayPayments.length} transaksi)</td>
-                <td className={`px-4 py-2 font-bold ${activeTab === 'vendor' ? 'text-red-700' : 'text-emerald-700'}`}>
-                  {fmt(displayPayments.reduce((s, p) => s + (p.amount || 0), 0))}
+                <td className="px-4 py-2 font-bold text-slate-700" colSpan={2}>
+                  Total ({total.toLocaleString('id-ID')} transaksi {filter !== 'all' ? 'pada periode' : 'keseluruhan'})
                 </td>
-                <td colSpan={4}></td>
+                <td className={`px-4 py-2 font-bold ${activeTab === 'vendor' ? 'text-red-700' : 'text-emerald-700'}`}>
+                  {fmt(activeTab === 'vendor' ? stats.totalCashOut : stats.totalCashIn)}
+                </td>
+                <td colSpan={3}></td>
               </tr>
             </tfoot>
           </table>
-        </div>
-      )}
+        )}
+        <PaginationFooter
+          page={page}
+          perPage={perPage}
+          total={total}
+          onPageChange={setPage}
+          onPerPageChange={setPerPage}
+          loading={loading}
+          itemLabel="transaksi"
+          testIdPrefix="payment-pagination"
+        />
+      </div>
 
       {/* Payment Modal */}
       {showModal && (
@@ -266,7 +345,6 @@ export default function PaymentModule({ token, userRole, prefillInvoice }) {
           title={form.payment_type === 'VENDOR_PAYMENT' ? '↑ Bayar Vendor (Cash Out)' : '↓ Terima dari Customer (Cash In)'}
           onClose={() => setShowModal(false)}>
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Type Toggle */}
             <div className="flex gap-2">
               {[
                 { value: 'VENDOR_PAYMENT', label: '↑ Cash Out (Vendor)', cls: 'border-red-400 text-red-700 bg-red-50' },

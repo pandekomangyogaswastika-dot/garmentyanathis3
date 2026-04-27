@@ -9,7 +9,7 @@
 - ✅ **Completed:** Phase 9 critical bug fix sprint (Login JSON error, Smart Import error-path stability, buyer portal authenticated PDF download, missing frontend deps).
 - ✅ **Completed (P0):** **Performance tuning — backend pagination** (backward compatible) added to major list endpoints + added missing MongoDB indexes + eliminated worst N+1 patterns.
 - ✅ **Verified (iteration_13, 100% pass):** Production Flow Audit fixes re-tested in continuation session — all 9 bugs (C-1, C-2, C-3, H-1, H-2, H-3, H-4, M-1, M-3) confirmed fixed and **fully compatible with the OVERPRODUCTION/UNDERPRODUCTION variance feature**. Cap logic uses `produced_qty` (not `ordered_qty`), so variance flow is preserved end-to-end.
-- 🎯 **Current Focus (next):** Performance tuning follow-up — **frontend server-side pagination** (DataTable) + shared caching to stop downloading full datasets.
+- 🎯 **Current Focus (next):** Performance tuning follow-up — **frontend server-side pagination** rollout (DataTable + non-DataTable screens) + complete remaining backend N+1 reductions on report endpoints.
 
 ---
 
@@ -115,7 +115,7 @@ Emergent preview logger wraps `window.fetch` and calls `response.text()` on non-
 ---
 
 ## Phase 10 — Performance Tuning (P0-first)
-**Status: ✅ Phase 10A COMPLETED (2026-04-27); Phase 10B PARTIAL; Phase 10C PENDING**
+**Status: ✅ Phase 10A COMPLETED (2026-04-27); Phase 10B PARTIAL; Phase 10C IN PROGRESS (planned)**
 
 ### Context / Problem
 Current UI uses **client-side pagination** (`DataTable.jsx` slices arrays), but backend previously returned full datasets for many list endpoints (frequent `.to_list(None)`), which will not scale. Several endpoints also contained **N+1 query patterns** that multiplied DB calls per request.
@@ -225,40 +225,101 @@ The heaviest endpoints were optimized to eliminate the worst N+1 patterns:
 - `GET /api/production-returns`: batch fetch `production_return_items`.
 - `GET /api/production-jobs`: batch fetch child jobs + job_items + aggregate shipped totals by job_item_id.
 
-#### Remaining scope (future)
-- Apply the same batch/aggregation approach to other report endpoints (e.g., `/api/reports/*`) which still use loops.
-- Consider aggregation pipelines with `$lookup` for select endpoints once schemas stabilize.
+#### Remaining scope (10B-rem — planned)
+Focus: **report endpoints** and other endpoints that still use looped `.find_one()`/`.find()` patterns.
+
+**10B-rem tasks**
+1. **Inventory remaining N+1 hotspots**
+   - Search backend for patterns like `for ...: await db.*.find_one()` and `.to_list(None)` inside loops.
+   - Prioritize endpoints with large fan-out (reports dashboards).
+2. **Batch strategy**
+   - Replace per-row lookups with:
+     - `$in` queries + in-memory maps, or
+     - aggregation pipelines (`$group`) for totals, or
+     - selective `$lookup` for stable join paths.
+3. **Protect backward compatibility**
+   - Keep response shapes stable unless adding *new* fields.
+4. **Verification**
+   - Use before/after request tracing (counts of DB calls) + payload time comparison.
+   - Add/extend targeted regression tests around the optimized report endpoints.
+
+**Exit criteria (10B-rem)**
+- No report endpoint performs per-row DB queries for common list sizes.
+- Latency improved measurably (at least fewer DB round-trips; ideally lower p95).
 
 ---
 
-### Phase 10C — Frontend tuning (Next follow-up)
-**Status: ⏳ PENDING**
+### Phase 10C — Frontend tuning: True server-side pagination rollout
+**Status: 🟠 IN PROGRESS (implementation planned next)**
 
 #### Problem remaining
 Even with backend pagination implemented, current screens still download full lists because:
 - `DataTable.jsx` paginates client-side (slicing arrays)
 - Modules call list endpoints without `page/per_page`
 
-#### Scope (recommended next work)
-1. Update `DataTable.jsx` to support a **server-side pagination mode**:
-   - accepts `page`, `per_page`, `total`, `onPageChange`, `onPerPageChange`
-   - renders pagination UI based on totals
-2. Update high-traffic modules to request paginated data:
-   - Production PO, Products, Garments, Invoices, Payments, Activity Logs
-3. Optional: introduce React Query/SWR for caching + request deduping.
+#### Strategy (Phase 10C — approved)
+**Backwards-compatible** frontend change:
+1. Enhance `DataTable.jsx` with an **optional server-side pagination mode** via a new prop (proposed name):
+   - `serverPagination` (object) containing:
+     - `enabled: true`
+     - `fetcher(params)` that calls the backend with `page/per_page/sort_by/sort_dir/search` and returns the envelope
+     - `initialPage`, `initialPerPage`, `initialSort` (optional)
+     - `externalDeps` (optional) so filters trigger a refetch
+   - When `serverPagination` is **absent**, DataTable behaves exactly as today (client-side search/sort/paging).
+2. Introduce a shared `PaginationFooter` component for screens that **do not** use DataTable (custom lists/tables), but still need consistent paging UX.
 
-#### Exit criteria
+#### Module migration scope (requested)
+**A) DataTable-based screens (migrate to serverPagination mode)**
+1. `ProductsModule.jsx` → `GET /api/products?page=...&per_page=...&search=...&sort_by=...&sort_dir=...`
+2. `ProductionPOModule.jsx` → `GET /api/production-pos?page=...` plus existing filters (`search`, `status`) and sorting
+3. `InvoiceModule.jsx` → `GET /api/invoices?page=...` plus `status` filter and sorting
+
+**B) Non-DataTable screens (use PaginationFooter + server paging in-module)**
+4. `PaymentModule.jsx` (custom tabbed table)
+   - Paginate `GET /api/payments` for **each tab** (vendor/customer)
+   - Avoid downloading all invoices if possible (follow-up: add a paginated unpaid invoice picker endpoint or filter)
+5. `ActivityLogModule.jsx` (custom list)
+   - Switch from `limit=200` to `page/per_page`
+   - Keep filters (`module`, `user_id`) in query params
+
+#### Implementation steps (10C)
+1. **Create** `PaginationFooter.jsx` (shared): shows range, total, prev/next, numbered pages; supports `per_page` selector.
+2. **Refactor** `DataTable.jsx`:
+   - Add serverPagination mode (loading state, refetch on page/sort/search changes)
+   - In server mode, sorting should translate to `sort_by/sort_dir` and request fresh data
+   - Search should debounce (e.g. 250–400ms) to avoid hammering the backend
+3. **Migrate** modules in order:
+   1) Products (simplest)
+   2) Invoices
+   3) Production PO (largest payload + extra filters)
+   4) Activity Logs
+   5) Payments
+4. **QA & verification**
+   - Confirm network payload is reduced (20–50 rows per request)
+   - Confirm filters reset page to 1
+   - Confirm sort persistence remains correct (storageKey still used)
+
+#### Exit criteria (10C)
 - Key list screens load only 20–50 rows at a time from the backend.
-- Filter/sort triggers re-fetch page 1.
+- Filter/sort triggers re-fetch (and resets to page 1).
 - Noticeable improvement in network payload + time-to-interactive for large datasets.
+- Legacy behavior preserved for screens not yet migrated.
 
 ---
 
 ## Next Actions (Immediate)
-1. Implement **Phase 10C** frontend server-side pagination for the most-used list screens.
-2. After that, revisit remaining heavy report endpoints for aggregation (extend 10B).
+1. Implement **Phase 10C**:
+   - Add `serverPagination` mode to `DataTable.jsx`
+   - Add `PaginationFooter` for non-DataTable UIs
+   - Migrate: Products, ProductionPO, Invoice, ActivityLog, Payment
+2. Implement **Phase 10B-rem**:
+   - Identify remaining N+1 patterns on report endpoints and batch-fix
+3. Run verification:
+   - Frontend smoke tests for all migrated screens
+   - (Optional) targeted backend perf checks for optimized report endpoints
 
 ## Success Criteria
 - ✅ P0: Backend supports safe pagination and avoids unbounded reads.
 - ✅ P0: Heaviest list endpoints no longer have catastrophic N+1 query behaviour.
-- Next: Frontend stops downloading full datasets and uses true server paging.
+- 🎯 Next: Frontend stops downloading full datasets and uses true server paging.
+- 🎯 Next: Remaining report endpoints avoid per-row DB reads and scale with dataset size.
