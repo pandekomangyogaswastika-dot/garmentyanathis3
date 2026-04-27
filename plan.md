@@ -8,6 +8,7 @@
 - ✅ **Completed:** Phase 8 enhancement sprint (shipment safety guards, PO edit guardrails, system-wide sorting persistence, Smart Import add-ons, product variants, hook cleanup).
 - ✅ **Completed:** Phase 9 critical bug fix sprint (Login JSON error, Smart Import error-path stability, buyer portal authenticated PDF download, missing frontend deps).
 - ✅ **Completed (P0):** **Performance tuning — backend pagination** (backward compatible) added to major list endpoints + added missing MongoDB indexes + eliminated worst N+1 patterns.
+- ✅ **Verified (iteration_13, 100% pass):** Production Flow Audit fixes re-tested in continuation session — all 9 bugs (C-1, C-2, C-3, H-1, H-2, H-3, H-4, M-1, M-3) confirmed fixed and **fully compatible with the OVERPRODUCTION/UNDERPRODUCTION variance feature**. Cap logic uses `produced_qty` (not `ordered_qty`), so variance flow is preserved end-to-end.
 - 🎯 **Current Focus (next):** Performance tuning follow-up — **frontend server-side pagination** (DataTable) + shared caching to stop downloading full datasets.
 
 ---
