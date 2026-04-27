@@ -1,0 +1,14 @@
+[
+  {
+    "content": "Verify all audit bug fixes via testing agent (C-1, C-2, C-3, H-1 to H-4, M-1, M-3 + variance scenarios)",
+    "status": "in_progress"
+  },
+  {
+    "content": "Read test report & address any regressions/issues found",
+    "status": "pending"
+  },
+  {
+    "content": "Update plan.md with verification results & confirm phase status",
+    "status": "pending"
+  }
+]
